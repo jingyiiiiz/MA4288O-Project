@@ -27,80 +27,79 @@ def cvar_loss_canonical(pnl, alpha=0.5):
 
 class DeepHedgeCVaRTrainer:
     """
-    A simple trainer class that optimizes a neural-network model for 
-    CVaR (alpha) under frictionless PnL = p0 - payoff + sum(delta * (S_{k+1}-S_k)).
-    
-    Usage:
-       model = YourHedgeModel(...)  # e.g. RecurrentHedgeModel, SimpleHedgeModel
-       trainer = DeepHedgeCVaRTrainer(model, alpha=0.5, lr=1e-3)
-       p0 = trainer.train(S_tensor, Z_tensor, p0_init=0.0, n_epochs=10, batch_size=1024)
+    Trainer class for Deep Hedging using configurable optimizers and loss functions.
+    Supports both CVaR and Exponential Utility loss.
     """
-    def __init__(self, model, alpha=0.5, lr=1e-3):
+    def __init__(self, model, optimizer_config=None, loss_function='cvar', alpha=0.5, lam=1.0):
         self.model = model
-        self.alpha = alpha
-        self.lr = lr
-        self.opt = None
-        self.p0 = None  # We'll treat p0 as a learnable parameter
+        self.alpha = alpha  # CVaR risk parameter
+        self.lam = lam  # Exponential utility risk aversion
+        self.optimizer_config = optimizer_config if optimizer_config else {'name': 'adam', 'learning_rate': 1e-3}
+        self.loss_function = loss_function
+        self.p0 = None  # Trainable initial price
+        self.optimizer = self.configure_optimizer()
 
-    def train(self, S_tensor, Z_tensor, p0_init=0.0, n_epochs=10, batch_size=2048):
+    def configure_optimizer(self):
+        optimizer_name = self.optimizer_config.get('name', 'adam')
+        learning_rate = self.optimizer_config.get('learning_rate', 1e-3)
+        
+        if optimizer_name.lower() == 'adam':
+            return optim.Adam(self.model.parameters(), lr=learning_rate)
+        elif optimizer_name.lower() == 'sgd':
+            return optim.SGD(self.model.parameters(), lr=learning_rate, momentum=0.9)
+        else:
+            raise ValueError(f"Unsupported optimizer: {optimizer_name}")
+
+    def compute_loss(self, pnl, deltas, S, payoff):
+        from .loss_functions import cvar_loss_canonical, exponential_utility_loss
+        
+        if self.loss_function == 'cvar':
+            loss, _ = cvar_loss_canonical(pnl, alpha=self.alpha)
+        elif self.loss_function == 'exp_utility':
+            loss = exponential_utility_loss(S, deltas, payoff, lam=self.lam)
+        else:
+            raise ValueError("Invalid loss function. Choose 'cvar' or 'exp_utility'")
+        
+        return loss
+
+    def train(self, S_tensor, Z_tensor, p0_init=0.0, n_epochs=10, batch_size=4096):
         """
-        Minimizes CVaR_{alpha} of negative PnL:
-          PnL = p0 - Z + sum_{k=0..steps-1} [ delta_k(S_{k+1} - S_k) ].
-
-        Args:
-          S_tensor: shape (n_scenarios, steps+1), float
-          Z_tensor: shape (n_scenarios,), float
-          p0_init: initial guess for the hedge price p0
-          n_epochs: training epochs
-          batch_size: mini-batch size
-
-        Returns:
-          The learned p0 as a float
+        Trains the model using the specified loss function and optimizer.
         """
         device = S_tensor.device
-
-        # define p0 as a trainable parameter
-        self.p0 = torch.tensor([p0_init], requires_grad=True, device=device)
-        param_list = list(self.model.parameters()) + [self.p0]
-        self.opt = optim.Adam(param_list, lr=self.lr)
-
         dataset_size = S_tensor.shape[0]
-        steps = self.model.steps  # the model is assumed to have an attribute .steps
+        self.p0 = torch.tensor([p0_init], requires_grad=True, device=device)
+        
+        param_list = list(self.model.parameters()) + [self.p0]
+        self.optimizer = self.configure_optimizer()
 
         for epoch in range(n_epochs):
-            # Shuffle for each epoch
             idx = torch.randperm(dataset_size, device=device)
-            S_shuffled = S_tensor[idx]
-            Z_shuffled = Z_tensor[idx]
-
+            S_shuffled, Z_shuffled = S_tensor[idx], Z_tensor[idx]
+            
             for start in range(0, dataset_size, batch_size):
-                end = min(start+batch_size, dataset_size)
-                Sb = S_shuffled[start:end]
-                Zb = Z_shuffled[start:end]
-
-                # Forward pass: 
-                #   deltas_b => shape (mini_batch, steps)
+                end = min(start + batch_size, dataset_size)
+                Sb, Zb = S_shuffled[start:end], Z_shuffled[start:end]
+                
                 deltas_b = self.model(Sb)
-                Sdiff_b = Sb[:,1:] - Sb[:,:-1]  # shape (mini_batch, steps)
-                gains_b = torch.sum(deltas_b * Sdiff_b, dim=1)  # (mini_batch,)
+                Sdiff_b = Sb[:, 1:] - Sb[:, :-1]
+                gains_b = torch.sum(deltas_b * Sdiff_b, dim=1)
                 pnl_b = self.p0 - Zb + gains_b
-
-                loss_b, w_b = cvar_loss_canonical(pnl_b, alpha=self.alpha)
-
-                self.opt.zero_grad()
+                
+                loss_b = self.compute_loss(pnl_b, deltas_b, Sb, Zb)
+                
+                self.optimizer.zero_grad()
                 loss_b.backward()
-                self.opt.step()
-
-            # End-of-epoch progress check
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)  # Gradient clipping
+                self.optimizer.step()
+            
             with torch.no_grad():
                 deltas_all = self.model(S_tensor)
-                Sdiff_all = S_tensor[:,1:] - S_tensor[:,:-1]
+                Sdiff_all = S_tensor[:, 1:] - S_tensor[:, :-1]
                 gains_all = torch.sum(deltas_all * Sdiff_all, dim=1)
                 pnl_all = self.p0 - Z_tensor + gains_all
-                loss_all, w_all = cvar_loss_canonical(pnl_all, alpha=self.alpha)
+                loss_all = self.compute_loss(pnl_all, deltas_all, S_tensor, Z_tensor)
+                
+            print(f"Epoch {epoch+1}/{n_epochs} | Loss: {loss_all.item():.4f} | p0: {self.p0.item():.4f}")
 
-            print(f"Epoch {epoch+1}/{n_epochs} | CVaR loss: {loss_all.item():.4f}, "
-                  f"w={w_all.item():.4f}, p0={self.p0.item():.4f}")
-
-        # Return the final learned p0
         return self.p0.item()
