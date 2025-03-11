@@ -103,3 +103,61 @@ class DeepHedgeCVaRTrainer:
             print(f"Epoch {epoch+1}/{n_epochs} | Loss: {loss_all.item():.4f} | p0: {self.p0.item():.4f}")
 
         return self.p0.item()
+    
+    # optimizer/hedge_train.py
+
+def compute_2instrument_pnl(p0, payoff, deltas, market):
+    """
+    p0: float
+    payoff: shape (batch_size,)
+    deltas: shape (batch_size, steps, 2) => [deltaS, deltaV]
+    market: shape (batch_size, steps+1, 2) => [S, vsw]
+    returns shape (batch_size,) final PnL
+    """
+    # S_diff, vsw_diff
+    S_diff = market[:, 1:, 0] - market[:, :-1, 0]     # (batch, steps)
+    vsw_diff = market[:, 1:, 1] - market[:, :-1, 1]  # (batch, steps)
+
+    gains = (deltas[:, :, 0]*S_diff + deltas[:, :, 1]*vsw_diff).sum(dim=1)
+    return p0 - payoff + gains
+
+# In your trainer code:
+# check if 'market_tensor' has shape (batch, steps+1, 2) or (batch, steps+1)
+# then decide single vs multi instrument
+
+class DeepHedgeCVaRTrainer2Asset:
+    def __init__(self, model, alpha=0.5, lr=1e-3):
+        self.model = model
+        self.alpha = alpha
+        self.lr = lr
+        self.opt = None
+        self.p0 = None
+
+    def train(self, market_tensor, payoff_tensor, p0_init=0.0, n_epochs=10, batch_size=1024):
+        device = market_tensor.device
+        self.p0 = torch.tensor([p0_init], requires_grad=True, device=device)
+        param_list = list(self.model.parameters()) + [self.p0]
+        self.opt = torch.optim.Adam(param_list, lr=self.lr)
+
+        dataset_size = market_tensor.shape[0]
+
+        for epoch in range(n_epochs):
+            idx = torch.randperm(dataset_size, device=device)
+            M_shuffled = market_tensor[idx]
+            Z_shuffled = payoff_tensor[idx]
+
+            for start in range(0, dataset_size, batch_size):
+                end = min(start+batch_size, dataset_size)
+                Mb = M_shuffled[start:end]
+                Zb = Z_shuffled[start:end]
+
+                deltas_b = self.model(Mb)  # (batch, steps, 2)
+                pnl_b = compute_2instrument_pnl(self.p0, Zb, deltas_b, Mb)
+
+                loss_b, w_b = cvar_loss_canonical(pnl_b, alpha=self.alpha)
+                self.opt.zero_grad()
+                loss_b.backward()
+                self.opt.step()
+
+            # optional end-of-epoch print
+        return self.p0.item()

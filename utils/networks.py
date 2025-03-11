@@ -88,3 +88,44 @@ class SharedHedgeNetwork(nn.Module):
     def forward(self, x):
         x = F.relu(self.fc1(x))
         return self.fc2(x)
+
+class MultiAssetHedgeModel(nn.Module):
+    """
+    Recurrent approach for two instruments, e.g. underlying + var swap.
+    delta_k = F_k( S_k, VSW_k, delta_{k-1} ).
+    """
+    def __init__(self, steps=30, in_dim=4, hidden_dim=32, out_dim=2):
+        """
+        steps: number of rebalancing times
+        in_dim=4 => e.g. [S_k, vsw_k, delta_S_{k-1}, delta_V_{k-1}]
+        out_dim=2 => [delta_S_k, delta_VSW_k]
+        """
+        super().__init__()
+        self.steps = steps
+        self.day_nets = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(in_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, out_dim)
+            )
+            for _ in range(steps)
+        ])
+
+    def forward(self, market):
+        """
+        market shape => (batch_size, steps+1, 2) i.e. [S_k, vsw_k]
+        returns => deltas (batch_size, steps, 2)
+        """
+        batch_size = market.shape[0]
+        delta_prev = torch.zeros(batch_size, 2, device=market.device)
+        deltas_list = []
+
+        for k in range(self.steps):
+            S_k = market[:, k, 0].unsqueeze(1)
+            VSW_k = market[:, k, 1].unsqueeze(1)
+            x = torch.cat([S_k, VSW_k, delta_prev], dim=1)  # shape (batch, 4)
+            delta_k = self.day_nets[k](x)                  # shape (batch,2)
+            deltas_list.append(delta_k)
+            delta_prev = delta_k
+
+        return torch.stack(deltas_list, dim=1)  # (batch_size, steps, 2)

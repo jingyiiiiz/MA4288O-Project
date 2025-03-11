@@ -61,3 +61,24 @@ class HestonModel:
             S[:, t+1] = st * np.exp((self.r - 0.5*vt)*self.dt + np.sqrt(vt)*dW1)
 
         return S, V
+    
+def make_varianceswap_paths(S_paths, V_paths, dt):
+    """
+    Creates a naive daily mark-to-market for a variance swap from t=0..T
+    shape => (n_paths, n_steps+1)
+
+    For demonstration, we'll do a toy approach:
+    vsw[k] ~ expected integral of variance from k..end
+    We'll do an extremely naive estimate:
+    vsw[k] = V_paths[:,k] * (time_left)
+    """
+    n_paths, n_steps_plus = V_paths.shape
+    n_steps = n_steps_plus - 1
+    vsw = np.zeros_like(V_paths)  # same shape
+
+    for i in range(n_paths):
+        for k in range(n_steps+1):
+            time_left = (n_steps - k)*dt
+            vsw[i, k] = V_paths[i, k] * time_left
+    return vsw
+
