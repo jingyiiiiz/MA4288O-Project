@@ -35,8 +35,9 @@ class RecurrentHedgeModel(nn.Module):
         delta_prev = self.a_init.expand(batch_size, 1)
 
         for t in range(self.steps):
-            S_t = S[:, t].unsqueeze(1)
-            input_t = torch.cat([S_t, delta_prev, h_t], dim=1)
+            S_t = S[:, t, :].view(S.shape[0], -1)  # Ensure correct shape
+            input_t = torch.cat([S_t, delta_prev.view(S.shape[0], -1), h_t.view(S.shape[0], -1)], dim=1)
+ 
             delta_t = self.shared_net(input_t)
             deltas.append(delta_t)
             h_t = 0.8 * h_t + 0.2 * delta_t  # Track recurrent state
@@ -86,5 +87,22 @@ class SharedHedgeNetwork(nn.Module):
         self.fc2 = nn.Linear(hidden_dim, output_dim)
 
     def forward(self, x):
-        x = F.relu(self.fc1(x))
-        return self.fc2(x)
+        if x.dim() == 2:  # Handle case where input has (batch, features)
+            batch_size, features = x.shape
+            steps = 1  # No time dimension in this case
+            x = x.view(batch_size, steps, features)
+        else:
+            batch_size, steps, features = x.shape  # Standard case
+
+        x = x.view(batch_size * steps, -1)  # Flatten for processing
+
+        
+        x = F.relu(self.fc1(x))  
+        x = self.fc2(x)
+        
+        # Reshape back to (batch, steps, assets)
+        x = x.view(batch_size, steps, -1)  
+
+        return x
+
+

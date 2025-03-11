@@ -81,9 +81,10 @@ class DeepHedgeCVaRTrainer:
                 end = min(start + batch_size, dataset_size)
                 Sb, Zb = S_shuffled[start:end], Z_shuffled[start:end]
                 
-                deltas_b = self.model(Sb)
-                Sdiff_b = Sb[:, 1:] - Sb[:, :-1]
-                gains_b = torch.sum(deltas_b * Sdiff_b, dim=1)
+                deltas_b = self.model(Sb)  # Shape (batch, steps, num_assets)
+                Sdiff_b = Sb[:, 1:, :] - Sb[:, :-1, :]  # Ensure correct shape
+                gains_b = torch.sum(deltas_b * Sdiff_b, dim=(1, 2))  # Sum over time and assets
+
                 pnl_b = self.p0 - Zb + gains_b
                 
                 loss_b = self.compute_loss(pnl_b, deltas_b, Sb, Zb)
@@ -103,3 +104,15 @@ class DeepHedgeCVaRTrainer:
             print(f"Epoch {epoch+1}/{n_epochs} | Loss: {loss_all.item():.4f} | p0: {self.p0.item():.4f}")
 
         return self.p0.item()
+    
+
+class MultiAssetDeepHedgeCVaRTrainer(DeepHedgeCVaRTrainer):
+    """
+    Trainer class for multi-asset Deep Hedging with CVaR loss.
+    """
+    def compute_loss(self, pnl, deltas, S, payoff):
+        """
+        Compute loss for multi-asset case, summing across assets.
+        """
+        loss, _ = cvar_loss_canonical(pnl, alpha=self.alpha)
+        return loss
