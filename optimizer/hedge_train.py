@@ -65,10 +65,15 @@ class DeepHedgeCVaRTrainer:
     def train(self, S_tensor, Z_tensor, p0_init=0.0, n_epochs=10, batch_size=4096):
         """
         Trains the model using the specified loss function and optimizer.
+        Accepts either a float or torch.Tensor for p0_init.
         """
         device = S_tensor.device
         dataset_size = S_tensor.shape[0]
-        self.p0 = torch.tensor([p0_init], requires_grad=True, device=device)
+
+        if isinstance(p0_init, torch.Tensor):
+            self.p0 = p0_init.clone().detach().to(device).requires_grad_()
+        else:
+            self.p0 = torch.tensor([p0_init], requires_grad=True, device=device)
         
         param_list = list(self.model.parameters()) + [self.p0]
         self.optimizer = self.configure_optimizer()
