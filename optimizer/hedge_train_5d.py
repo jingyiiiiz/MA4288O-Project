@@ -1,5 +1,16 @@
 import torch
 
+import torch.nn.functional as F
+
+def cvar_loss_canonical(pnl, alpha=0.5):
+    """
+    Computes CVaR loss from negative PnL (canonical form).
+    """
+    X = -pnl
+    w = X.median()
+    loss = w + (1.0 / (1.0 - alpha)) * torch.mean(F.relu(X - w))
+    return loss, w
+
 def compute_5D_pnl(p0, payoff, deltas, S):
     """
     p0: float

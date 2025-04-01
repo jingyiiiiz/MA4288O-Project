@@ -41,3 +41,35 @@ class RecurrentHedgeModel5D(nn.Module):
             delta_prev = delta_k
         # shape => (batch_size, steps, 5)
         return torch.stack(deltas_list, dim=1)
+
+class RecurrentHedgeModel2D(nn.Module):
+    """
+    Recurrent model for 2 assets.
+    delta_k = f(S_k1, S_k2, delta_k-1, delta_k-1, h_k-1)
+    Input dim: 2 (prices) + 2 (deltas) + h
+    Output dim: 2
+    """
+    def __init__(self, steps=30, in_dim=4, hidden_dim=32, out_dim=2):
+        super().__init__()
+        self.steps = steps
+        self.day_nets = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(in_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, out_dim)
+            ) for _ in range(steps)
+        ])
+
+    def forward(self, S):
+        batch_size = S.shape[0]
+        delta_prev = torch.zeros(batch_size, 2, device=S.device)
+        deltas_list = []
+
+        for k in range(self.steps):
+            S_k = S[:, k, :]  # (batch, 2)
+            x = torch.cat([S_k, delta_prev], dim=1)  # (batch, 4)
+            delta_k = self.day_nets[k](x)  # (batch, 2)
+            deltas_list.append(delta_k)
+            delta_prev = delta_k
+
+        return torch.stack(deltas_list, dim=1)  # (batch, steps, 2)
